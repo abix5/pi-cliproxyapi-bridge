@@ -113,12 +113,13 @@ type builtinProvider struct {
 }
 
 type builtinModel struct {
-	ID            string `json:"id"`
-	OwnedBy       string `json:"owned_by"`
-	Name          string `json:"name,omitempty"`
-	Reasoning     *bool  `json:"reasoning,omitempty"`
-	ContextWindow int    `json:"contextWindow,omitempty"`
-	MaxTokens     int    `json:"maxTokens,omitempty"`
+	ID            string   `json:"id"`
+	OwnedBy       string   `json:"owned_by"`
+	Name          string   `json:"name,omitempty"`
+	Reasoning     *bool    `json:"reasoning,omitempty"`
+	ContextWindow int      `json:"contextWindow,omitempty"`
+	MaxTokens     int      `json:"maxTokens,omitempty"`
+	Input         []string `json:"input,omitempty"`
 }
 
 type customModel struct {
@@ -135,8 +136,9 @@ type customModel struct {
 	Reasoning             bool       `json:"reasoning"`
 	// FromCatalog reports whether metadata was resolved at all, and
 	// MetadataSource says how: catalog, alias, override, or default.
-	FromCatalog    bool   `json:"fromCatalog,omitempty"`
-	MetadataSource string `json:"metadataSource,omitempty"`
+	FromCatalog    bool     `json:"fromCatalog,omitempty"`
+	MetadataSource string   `json:"metadataSource,omitempty"`
+	Input          []string `json:"input,omitempty"`
 }
 
 type discoveryCounts struct {
@@ -219,6 +221,9 @@ func mergeEntry(dst, src catalogEntry) catalogEntry {
 	}
 	if dst.Cost == nil {
 		dst.Cost = src.Cost
+	}
+	if len(dst.Input) == 0 {
+		dst.Input = append([]string(nil), src.Input...)
 	}
 	return dst
 }
@@ -389,6 +394,7 @@ func buildBuiltinModel(model upstreamModel, entry catalogEntry, inCatalog bool) 
 		out.ContextWindow = entry.ContextWindow
 		out.MaxTokens = entry.MaxTokens
 		out.Reasoning = entry.Reasoning
+		out.Input = append([]string(nil), entry.Input...)
 	}
 	if forced := forcedReasoning(model.ID); forced != nil {
 		out.Reasoning = forced
@@ -420,6 +426,7 @@ func buildCustomModel(model upstreamModel, entry catalogEntry, resolved bool, so
 		// document honest: a real zero is not the same as "unknown, assume 128k".
 		out.ContextWindow = entry.ContextWindow
 		out.MaxTokens = entry.MaxTokens
+		out.Input = append([]string(nil), entry.Input...)
 		if entry.Cost != nil {
 			out.Cost = entry.Cost
 		}

@@ -20,6 +20,7 @@ type catalogEntry struct {
 	ContextWindow int
 	MaxTokens     int
 	Cost          *modelCost
+	Input         []string
 }
 
 type modelCost struct {
@@ -47,6 +48,9 @@ type modelsDevEntry struct {
 		CacheRead  *float64 `json:"cache_read"`
 		CacheWrite *float64 `json:"cache_write"`
 	} `json:"cost"`
+	Modalities *struct {
+		Input []string `json:"input"`
+	} `json:"modalities"`
 }
 
 // preferredCatalogProviders win when several providers publish the same model
@@ -148,6 +152,9 @@ func flattenCatalog(payload modelsDevPayload) map[string]catalogEntry {
 				Reasoning:     meta.Reasoning,
 				ContextWindow: meta.Limit.Context,
 				MaxTokens:     meta.Limit.Output,
+			}
+			if meta.Modalities != nil {
+				entry.Input = append([]string(nil), meta.Modalities.Input...)
 			}
 			if meta.Cost != nil {
 				cost := modelCost{}
