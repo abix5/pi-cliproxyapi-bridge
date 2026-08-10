@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -226,7 +227,8 @@ func TestCatalogChoiceIsDeterministic(t *testing.T) {
 
 	first := flattenCatalog(payload)["gpt-oss-120b"]
 	for i := 0; i < 30; i++ {
-		if got := flattenCatalog(payload)["gpt-oss-120b"]; got != first {
+		got := flattenCatalog(payload)["gpt-oss-120b"]
+		if !slices.Equal(got.Input, first.Input) || got.ContextWindow != first.ContextWindow || got.MaxTokens != first.MaxTokens || got.Name != first.Name {
 			t.Fatalf("catalogue choice varies between runs: %+v vs %+v", got, first)
 		}
 	}
@@ -299,5 +301,60 @@ func TestConsensusCoversReasoningFlag(t *testing.T) {
 		if got.Reasoning == nil || !*got.Reasoning {
 			t.Fatalf("expected reasoning to follow the majority, got %v", got.Reasoning)
 		}
+	}
+}
+
+// models.dev publishes accepted input modalities per model; the flattened
+// catalogue row must keep them so the well-known contract can forward them.
+func TestFlattenCatalogKeepsInputModalities(t *testing.T) {
+	entry := modelsDevEntry{Name: "vision-model"}
+	entry.Limit.Context, entry.Limit.Output = 128_000, 16_000
+	entry.Modalities = &struct {
+		Input []string `json:"input"`
+	}{Input: []string{"text", "image"}}
+
+	payload := modelsDevPayload{
+		"xiaomi": {Models: map[string]modelsDevEntry{"vision-model": entry}},
+	}
+
+	got := flattenCatalog(payload)["vision-model"]
+	if !slices.Equal(got.Input, []string{"text", "image"}) {
+		t.Fatalf("input modalities = %v, want [text image]", got.Input)
+	}
+}
+
+// The well-known contract must carry modalities on both custom and builtin
+// models so a pi client can register them as vision-capable.
+func TestContractModelsCarryInputModalities(t *testing.T) {
+	entry := catalogEntry{
+		Name:          "Vision model",
+		ContextWindow: 262_144,
+		MaxTokens:     32_768,
+		Input:         []string{"text", "image"},
+	}
+
+	custom := buildCustomModel(
+		upstreamModel{ID: "vision-pro", OwnedBy: "Xiaomi"},
+		entry, true, "catalog",
+		map[string]string{"openai-completions": "https://example.test/v1"},
+	)
+	if !slices.Equal(custom.Input, []string{"text", "image"}) {
+		t.Fatalf("custom model input = %v, want [text image]", custom.Input)
+	}
+
+	builtin := buildBuiltinModel(upstreamModel{ID: "vision-o", OwnedBy: "openai"}, entry, true)
+	if !slices.Equal(builtin.Input, []string{"text", "image"}) {
+		t.Fatalf("builtin model input = %v, want [text image]", builtin.Input)
+	}
+
+	// A model absent from the catalogue keeps a nil slice rather than a
+	// misleading empty one, so the JSON field is omitted entirely.
+	unknown := buildCustomModel(
+		upstreamModel{ID: "unknown-model", OwnedBy: "Xiaomi"},
+		catalogEntry{}, false, "default",
+		map[string]string{"openai-completions": "https://example.test/v1"},
+	)
+	if unknown.Input != nil {
+		t.Fatalf("unknown model input = %v, want nil", unknown.Input)
 	}
 }

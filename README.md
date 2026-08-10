@@ -63,7 +63,10 @@ no vendor entry, the metadata most hosts agree on wins. Ties break on provider
 name so the same model never changes limits between restarts.
 
 Every model reports `metadataSource`, and contract v2 lists `unmatchedIds`, so
-it is visible which models still need an alias or override:
+it is visible which models still need an alias or override. Each model also
+reports `input` — the modalities it accepts (`["text"]`, or `["text","image"]`
+for vision models) — taken from models.dev's `modalities.inputs`; the field is
+omitted for models the catalogue does not know.
 
 ```yaml
       advanced: |
