@@ -341,8 +341,10 @@ curl -H "Authorization: Bearer <api key>" \
 ```
 
 Produces `dist/pi-bridge-v<version>.so` for `linux/amd64`, built against SDK
-`github.com/router-for-me/CLIProxyAPI/v8` `v8.0.63`. The SDK version must match the running CLIProxyAPI image or
-`cliproxy_plugin_init` will be rejected.
+`github.com/router-for-me/CLIProxyAPI/v8` `v8.0.63`. The host checks the
+plugin ABI version (`1`) at `cliproxy_plugin_init` and rejects a plugin whose
+registration schema is newer than its own, so build against an SDK no newer
+than the running CLIProxyAPI image.
 
 For an arm64 CLIProxyAPI image, build with `PLATFORM=linux/arm64 ./build.sh`.
 Building for a platform other than the Docker host's needs QEMU/binfmt
