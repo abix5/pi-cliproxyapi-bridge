@@ -10,7 +10,7 @@
 # would require a container restart.
 set -euo pipefail
 
-CPA_SDK_VERSION="${CPA_SDK_VERSION:-v7.2.93}"
+CPA_SDK_VERSION="${CPA_SDK_VERSION:-v8.0.63}"
 GO_IMAGE="${GO_IMAGE:-golang:1.26}"
 OUT_DIR="${OUT_DIR:-dist}"
 

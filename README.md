@@ -341,7 +341,7 @@ curl -H "Authorization: Bearer <api key>" \
 ```
 
 Produces `dist/pi-bridge-v<version>.so` for `linux/amd64`, built against SDK
-`v7.2.93`. The SDK version must match the running CLIProxyAPI image or
+`github.com/router-for-me/CLIProxyAPI/v8` `v8.0.63`. The SDK version must match the running CLIProxyAPI image or
 `cliproxy_plugin_init` will be rejected.
 
 ## Deploy without restarting CLIProxyAPI
