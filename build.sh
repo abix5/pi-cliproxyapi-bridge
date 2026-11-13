@@ -14,7 +14,9 @@
 set -euo pipefail
 
 CPA_SDK_VERSION="${CPA_SDK_VERSION:-v8.0.63}"
-GO_IMAGE="${GO_IMAGE:-golang:1.26}"
+# The CLIProxyAPI image runs on debian:bookworm, so link against the same
+# glibc to avoid symbol versions the runtime does not provide.
+GO_IMAGE="${GO_IMAGE:-golang:1.26-bookworm}"
 OUT_DIR="${OUT_DIR:-dist}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 
