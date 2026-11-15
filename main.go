@@ -54,13 +54,13 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 const (
 	pluginName    = "pi-bridge"
-	pluginVersion = "0.9.1"
+	pluginVersion = "0.10.0"
 
 	routePanel        = "/panel"
 	routeCapabilities = "/capabilities"
