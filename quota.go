@@ -74,7 +74,7 @@ type quotaModel struct {
 // of being silently dropped.
 func providerSupported(provider string) bool {
 	switch normalizeProvider(provider) {
-	case "claude", "codex", "antigravity", "github-copilot":
+	case "claude", "codex", "antigravity", "github-copilot", "xai":
 		return true
 	default:
 		return false
@@ -182,6 +182,8 @@ func fetchQuota(ctx context.Context, cfg pluginConfig, provider string, file aut
 		return fetchAntigravityQuota(ctx, cfg, file)
 	case "github-copilot":
 		return fetchCopilotQuota(ctx, cfg, file.AuthIndex)
+	case "xai":
+		return fetchXAIQuota(ctx, cfg, file.AuthIndex)
 	default:
 		return nil, nil
 	}
@@ -419,6 +421,115 @@ func fetchCopilotQuota(ctx context.Context, cfg pluginConfig, authIndex string) 
 		fraction,
 		firstNonEmpty(payload.QuotaResetDateUTC, payload.QuotaResetDate),
 	)}, nil
+}
+
+// ---- xAI (Grok) ----
+
+const (
+	xaiBillingURL        = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+	xaiWeeklyPeriodType  = "USAGE_PERIOD_TYPE_WEEKLY"
+	xaiSpendingLimitCode = "personal-team-blocked:spending-limit"
+	xaiFreeUsageCode     = "free-usage-exhausted"
+)
+
+type xaiBillingPayload struct {
+	Config *struct {
+		CreditUsagePercent *float64 `json:"creditUsagePercent"`
+		CurrentPeriod      *struct {
+			Type string `json:"type"`
+			End  string `json:"end"`
+		} `json:"currentPeriod"`
+	} `json:"config"`
+}
+
+// weeklyEnd returns the end of the current weekly billing period. Any other
+// period type, or a missing or unparsable end, is an error: reporting such a
+// payload as a weekly window would misstate when quota returns.
+func (p xaiBillingPayload) weeklyEnd() (string, error) {
+	if p.Config == nil || p.Config.CurrentPeriod == nil {
+		return "", fmt.Errorf("no xAI billing period found")
+	}
+	period := p.Config.CurrentPeriod
+	if period.Type != xaiWeeklyPeriodType {
+		return "", fmt.Errorf("xAI billing period is not weekly")
+	}
+	end := strings.TrimSpace(period.End)
+	if end == "" {
+		return "", fmt.Errorf("xAI billing period has no end")
+	}
+	if _, err := time.Parse(time.RFC3339, end); err != nil {
+		return "", fmt.Errorf("xAI billing period end is not RFC 3339")
+	}
+	return end, nil
+}
+
+func xaiWeeklyGroup(remaining float64, resetTime string) []quotaGroup {
+	return []quotaGroup{simpleGroup("seven-day", "7d Weekly", remaining, resetTime)}
+}
+
+// xaiExhausted reports whether a refused billing read itself says the account
+// is out of quota. That is a real observation of zero remaining, not a failure
+// to read the quota.
+func xaiExhausted(resp apiCallResponse) bool {
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return strings.Contains(resp.Body, xaiSpendingLimitCode)
+	case http.StatusTooManyRequests:
+		return strings.Contains(resp.Body, xaiFreeUsageCode)
+	default:
+		return false
+	}
+}
+
+// fetchXAIQuota reads the Grok CLI weekly credit usage. The token stays with
+// CLIProxyAPI, which substitutes $TOKEN$ and refreshes it when it expires.
+func fetchXAIQuota(ctx context.Context, cfg pluginConfig, authIndex string) ([]quotaGroup, error) {
+	resp, err := cfg.managementAPICall(ctx, apiCallRequest{
+		AuthIndex: authIndex,
+		Method:    http.MethodGet,
+		URL:       xaiBillingURL,
+		Header: map[string]string{
+			"Authorization":         "Bearer $TOKEN$",
+			"X-XAI-Token-Auth":      "xai-grok-cli",
+			"x-grok-client-version": cfg.advanced.XAIClientVersion,
+			"Accept":                "application/json",
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if xaiExhausted(resp) {
+		// The refusal rarely carries the billing period; use it only when it
+		// does, and never guess a reset time.
+		var payload xaiBillingPayload
+		resetTime := ""
+		if json.Unmarshal([]byte(resp.Body), &payload) == nil {
+			if end, errEnd := payload.weeklyEnd(); errEnd == nil {
+				resetTime = end
+			}
+		}
+		return xaiWeeklyGroup(0, resetTime), nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, providerFailure(resp.StatusCode)
+	}
+
+	var payload xaiBillingPayload
+	if err := json.Unmarshal([]byte(resp.Body), &payload); err != nil {
+		return nil, fmt.Errorf("invalid xAI billing payload")
+	}
+	end, err := payload.weeklyEnd()
+	if err != nil {
+		return nil, err
+	}
+	// The billing API omits creditUsagePercent while nothing has been used,
+	// so with a valid weekly period an absent value means 0% used.
+	used := 0.0
+	if payload.Config.CreditUsagePercent != nil {
+		used = *payload.Config.CreditUsagePercent
+	}
+	return xaiWeeklyGroup(remainingFromPercent(used), end), nil
 }
 
 // ---- Antigravity ----

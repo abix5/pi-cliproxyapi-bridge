@@ -44,6 +44,11 @@ type advancedConfig struct {
 	CapabilitiesTTLSeconds int    `json:"capabilities_ttl_seconds"`
 	PublicBaseURL          string `json:"public_base_url"`
 
+	// XAIClientVersion is sent as x-grok-client-version on the xAI billing
+	// read. Grok rejects clients it considers too old, so a deployment can
+	// raise it without a new release.
+	XAIClientVersion string `json:"xai_client_version"`
+
 	// QuotaWindows replaces the built-in description of where a provider's
 	// quota numbers live, keyed by provider ("claude", "codex"). Providers
 	// change the shape of these payloads without warning; the built-in rules
@@ -83,6 +88,7 @@ func defaultAdvanced() advancedConfig {
 		// more briefly and simply re-read this document.
 		UsageTTLSeconds:        120,
 		CapabilitiesTTLSeconds: 300,
+		XAIClientVersion:       "1.0.13",
 	}
 }
 
@@ -145,6 +151,10 @@ func parseConfig(raw []byte) (pluginConfig, error) {
 	}
 	if adv.CapabilitiesTTLSeconds <= 0 {
 		adv.CapabilitiesTTLSeconds = fallback.CapabilitiesTTLSeconds
+	}
+	adv.XAIClientVersion = strings.TrimSpace(adv.XAIClientVersion)
+	if adv.XAIClientVersion == "" {
+		adv.XAIClientVersion = fallback.XAIClientVersion
 	}
 	adv.ManagementURL = strings.TrimRight(strings.TrimSpace(adv.ManagementURL), "/")
 	adv.CPAMURL = strings.TrimRight(strings.TrimSpace(adv.CPAMURL), "/")

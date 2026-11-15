@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -216,7 +219,7 @@ func TestNormalizeProviderAndSupport(t *testing.T) {
 		t.Fatal("expected copilot to normalize to github-copilot")
 	}
 	// Parity with the sidecar: these providers report real quota.
-	for _, provider := range []string{"anthropic", "codex", "antigravity", "github-copilot"} {
+	for _, provider := range []string{"anthropic", "codex", "antigravity", "github-copilot", "xai"} {
 		if !providerSupported(provider) {
 			t.Fatalf("%s must be supported", provider)
 		}
@@ -389,4 +392,290 @@ func TestAntigravityGroupOrderIsStable(t *testing.T) {
 	if a[0] != "pro-models" {
 		t.Fatalf("expected pro models first, got %v", a)
 	}
+}
+
+// ---- xAI (Grok) ----
+
+const xaiTestManagementKey = "test-management-key"
+
+// fakeManagement stands in for the CLIProxyAPI management API. It answers the
+// fixed /api-call passthrough with a canned upstream status and body, and
+// records the request the plugin sent.
+type fakeManagement struct {
+	server *httptest.Server
+	got    apiCallRequest
+	calls  int
+}
+
+func newFakeManagement(t *testing.T, status int, body string) *fakeManagement {
+	t.Helper()
+	fake := &fakeManagement{}
+	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/management/api-call" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+xaiTestManagementKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fake.calls++
+		if err := json.NewDecoder(r.Body).Decode(&fake.got); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(apiCallResponse{StatusCode: status, Body: body})
+	}))
+	t.Cleanup(fake.server.Close)
+	return fake
+}
+
+func (f *fakeManagement) config(t *testing.T, advanced string) pluginConfig {
+	t.Helper()
+	t.Setenv("PI_BRIDGE_TEST_MANAGEMENT_KEY", xaiTestManagementKey)
+	if advanced == "" {
+		advanced = "{}"
+	}
+	var overrides map[string]any
+	if err := json.Unmarshal([]byte(advanced), &overrides); err != nil {
+		t.Fatalf("advanced: %v", err)
+	}
+	overrides["management_url"] = f.server.URL + "/v0/management"
+	overrides["management_key_env"] = "PI_BRIDGE_TEST_MANAGEMENT_KEY"
+	blob, err := json.Marshal(overrides)
+	if err != nil {
+		t.Fatalf("marshal advanced: %v", err)
+	}
+	raw, err := json.Marshal(map[string]string{"advanced": string(blob)})
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	cfg, err := parseConfig(raw)
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	return cfg
+}
+
+const xaiBillingSample = `{
+  "config": {
+    "creditUsagePercent": 4.0,
+    "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY",
+      "start": "2026-11-10T00:00:00Z", "end": "2026-11-17T00:00:00Z"},
+    "productUsage": [{"product": "grok-cli", "usagePercent": 4.0}]
+  },
+  "prepaidBalance": {"val": "0"},
+  "isUnifiedBillingUser": false,
+  "billingPeriodStart": "2026-11-01T00:00:00Z",
+  "billingPeriodEnd": "2026-12-01T00:00:00Z"
+}`
+
+func xaiQuota(t *testing.T, status int, body string) ([]quotaGroup, *fakeManagement, error) {
+	t.Helper()
+	fake := newFakeManagement(t, status, body)
+	groups, err := fetchQuota(context.Background(), fake.config(t, ""), "xai", authFile{AuthIndex: "xai-1"})
+	return groups, fake, err
+}
+
+func requireXAIWeekly(t *testing.T, groups []quotaGroup, err error, remaining float64, reset string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups = %+v, want one weekly group", groups)
+	}
+	g := groups[0]
+	if g.ID != "seven-day" || g.Label != "7d Weekly" {
+		t.Fatalf("group = %q/%q, want seven-day/7d Weekly", g.ID, g.Label)
+	}
+	if math.Abs(g.RemainingFraction-remaining) > 1e-9 {
+		t.Fatalf("remaining = %v, want %v", g.RemainingFraction, remaining)
+	}
+	if g.ResetTime != reset {
+		t.Fatalf("resetTime = %q, want %q", g.ResetTime, reset)
+	}
+	if len(g.Models) != 1 || g.Models[0].RemainingFraction != g.RemainingFraction {
+		t.Fatalf("models entry not mirrored: %+v", g.Models)
+	}
+}
+
+func TestXAIIsSupported(t *testing.T) {
+	if !providerSupported("xai") || !providerSupported("XAI") {
+		t.Fatal("xai must be supported")
+	}
+}
+
+func TestXAIWeeklyUsage(t *testing.T) {
+	groups, _, err := xaiQuota(t, http.StatusOK, xaiBillingSample)
+	requireXAIWeekly(t, groups, err, 0.96, "2026-11-17T00:00:00Z")
+}
+
+// The request goes through the passthrough with only the placeholder: the
+// plugin never sees the token.
+func TestXAIRequestShape(t *testing.T) {
+	_, fake, err := xaiQuota(t, http.StatusOK, xaiBillingSample)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := fake.got
+	if fake.calls != 1 || got.AuthIndex != "xai-1" || got.Method != http.MethodGet {
+		t.Fatalf("request = %+v (calls %d)", got, fake.calls)
+	}
+	if got.URL != "https://cli-chat-proxy.grok.com/v1/billing?format=credits" {
+		t.Fatalf("url = %q", got.URL)
+	}
+	want := map[string]string{
+		"Authorization":         "Bearer $TOKEN$",
+		"X-XAI-Token-Auth":      "xai-grok-cli",
+		"x-grok-client-version": "1.0.13",
+		"Accept":                "application/json",
+	}
+	for name, value := range want {
+		if got.Header[name] != value {
+			t.Fatalf("header %s = %q, want %q", name, got.Header[name], value)
+		}
+	}
+	if got.Data != "" {
+		t.Fatalf("GET must carry no body, got %q", got.Data)
+	}
+}
+
+func TestXAIClientVersionIsConfigurable(t *testing.T) {
+	fake := newFakeManagement(t, http.StatusOK, xaiBillingSample)
+	cfg := fake.config(t, `{"xai_client_version": " 1.0.70 "}`)
+	if _, err := fetchQuota(context.Background(), cfg, "xai", authFile{AuthIndex: "xai-1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := fake.got.Header["x-grok-client-version"]; got != "1.0.70" {
+		t.Fatalf("client version = %q, want 1.0.70", got)
+	}
+}
+
+// Management Center #492: the billing API omits the percentage while nothing
+// has been used.
+func TestXAIOmittedPercentMeansUnused(t *testing.T) {
+	groups, _, err := xaiQuota(t, http.StatusOK, `{"config":{"currentPeriod":{
+		"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-11-17T00:00:00Z"}}}`)
+	requireXAIWeekly(t, groups, err, 1, "2026-11-17T00:00:00Z")
+}
+
+// A period the plugin cannot describe as a weekly window must not be
+// reported as full quota.
+func TestXAIRejectsUnusablePeriod(t *testing.T) {
+	cases := map[string]string{
+		"monthly":    `{"config":{"creditUsagePercent":4,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_MONTHLY","end":"2026-12-01T00:00:00Z"}}}`,
+		"no end":     `{"config":{"creditUsagePercent":4,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"}}}`,
+		"bad end":    `{"config":{"creditUsagePercent":4,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"next week"}}}`,
+		"no period":  `{"config":{"creditUsagePercent":4}}`,
+		"no config":  `{}`,
+		"null":       `null`,
+		"empty type": `{"config":{"currentPeriod":{"end":"2026-11-17T00:00:00Z"}}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			groups, _, err := xaiQuota(t, http.StatusOK, body)
+			if err == nil {
+				t.Fatalf("want an error, got groups %+v", groups)
+			}
+		})
+	}
+}
+
+func TestXAIClampsUsage(t *testing.T) {
+	groups, _, err := xaiQuota(t, http.StatusOK, `{"config":{"creditUsagePercent":130,
+		"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-11-17T00:00:00Z"}}}`)
+	requireXAIWeekly(t, groups, err, 0, "2026-11-17T00:00:00Z")
+}
+
+// When the billing read itself says the account is out, that is zero
+// remaining, not an unknown.
+func TestXAIExhaustedIsZero(t *testing.T) {
+	cases := map[string]struct {
+		status int
+		body   string
+	}{
+		"spending limit": {http.StatusForbidden, `{"code":"personal-team-blocked:spending-limit","error":"Your team has reached its spending limit"}`},
+		"free usage":     {http.StatusTooManyRequests, `{"code":"free-usage-exhausted","error":"Free usage exhausted"}`},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			groups, _, err := xaiQuota(t, c.status, c.body)
+			requireXAIWeekly(t, groups, err, 0, "")
+		})
+	}
+}
+
+func TestXAIExhaustedKeepsKnownReset(t *testing.T) {
+	groups, _, err := xaiQuota(t, http.StatusForbidden, `{"code":"personal-team-blocked:spending-limit",
+		"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-11-17T00:00:00Z"}}}`)
+	requireXAIWeekly(t, groups, err, 0, "2026-11-17T00:00:00Z")
+}
+
+// Every other refusal is a failure to read quota, and the client sees only
+// the status code, never the upstream body.
+func TestXAIOtherRefusalsFail(t *testing.T) {
+	const secret = "upstream-detail-must-not-leak"
+	cases := map[string]struct {
+		status int
+		body   string
+	}{
+		"access denied":      {http.StatusForbidden, `{"error":"Access denied ` + secret + `"}`},
+		"429 other":          {http.StatusTooManyRequests, `{"error":"slow down ` + secret + `"}`},
+		"upgrade required":   {http.StatusUpgradeRequired, `{"error":"client too old ` + secret + `"}`},
+		"unauthorized":       {http.StatusUnauthorized, secret},
+		"spending limit 429": {http.StatusTooManyRequests, `{"code":"personal-team-blocked:spending-limit"}`},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			groups, _, err := xaiQuota(t, c.status, c.body)
+			if err == nil {
+				t.Fatalf("want a failure, got groups %+v", groups)
+			}
+			if want := providerFailure(c.status).Error(); err.Error() != want {
+				t.Fatalf("error = %q, want %q", err, want)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatal("upstream body leaked into the error")
+			}
+		})
+	}
+}
+
+func TestXAIMalformedPayloadFails(t *testing.T) {
+	groups, _, err := xaiQuota(t, http.StatusOK, `{"config": {"creditUsagePercent": "4`)
+	if err == nil {
+		t.Fatalf("want a failure, got groups %+v", groups)
+	}
+}
+
+// buildUsage reports xai as a supported provider with its weekly window.
+func TestXAIInUsageDocument(t *testing.T) {
+	fake := newFakeManagement(t, http.StatusOK, xaiBillingSample)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v0/management/auth-files", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(authFilesResponse{Files: []authFile{{AuthIndex: "xai-1", Provider: "xai"}}})
+	})
+	mux.Handle("/v0/management/api-call", fake.server.Config.Handler)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	cfg := fake.config(t, "")
+	cfg.advanced.ManagementURL = server.URL + "/v0/management"
+	doc, err := buildUsage(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("buildUsage: %v", err)
+	}
+	if len(doc.Unsupported) != 0 {
+		t.Fatalf("unsupported = %v, want none", doc.Unsupported)
+	}
+	if len(doc.Accounts) != 1 {
+		t.Fatalf("accounts = %+v", doc.Accounts)
+	}
+	account := doc.Accounts[0]
+	if !account.Supported || account.Error != "" {
+		t.Fatalf("account = %+v", account)
+	}
+	requireXAIWeekly(t, account.Groups, nil, 0.96, "2026-11-17T00:00:00Z")
 }

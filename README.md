@@ -143,6 +143,41 @@ A model-scoped window becomes a group id derived from its name
 flat fields are still read when the array is absent. A window the account does
 not have carries a null percent and is omitted rather than reported as full.
 
+### Supported providers
+
+| Provider | Windows |
+| --- | --- |
+| `claude` | from the `limits` array (see above) |
+| `codex` | `primary-window`, `secondary-window` |
+| `antigravity` | `pro-models`, `flash-models`, `thinking-models`, `other-models` |
+| `github-copilot` | `premium-requests` |
+| `xai` | `seven-day` ("7d Weekly") |
+
+Other providers are listed with `supported: false` and in
+`unsupportedProviders`.
+
+### xAI (Grok) quota
+
+`xai` accounts are read from the Grok CLI billing endpoint
+(`cli-chat-proxy.grok.com/v1/billing?format=credits`) through the management
+`/api-call` passthrough with `$TOKEN$`, so the plugin never holds the xAI token;
+CLIProxyAPI resolves and refreshes it. The result is one `seven-day` window:
+`remainingFraction` is `1 - creditUsagePercent / 100`, and `resetTime` is the end
+of the current weekly period.
+
+- An omitted `creditUsagePercent` with a valid weekly period means nothing has
+  been used yet (`1.0`).
+- A non-weekly period, or a period without an RFC 3339 end, is reported as an
+  error, never as full quota.
+- When the billing read itself says the account is out — `403` with
+  `personal-team-blocked:spending-limit` or `429` with `free-usage-exhausted` —
+  the window reports `0`. `resetTime` is set only if that response carries the
+  weekly period.
+- Any other refusal is reported as `provider API failed: <status>`.
+
+Grok rejects clients it considers too old; raise `xai_client_version` in the
+advanced JSON if the billing read starts returning `426`.
+
 ### When a provider changes shape
 
 Providers move these fields without warning — that `limits` migration silently
@@ -228,6 +263,7 @@ Leave `advanced` empty unless a URL, secret source, or cache TTL must differ:
 | `cpam_admin_key_env` / `cpam_admin_key_file` | unset |
 | `usage_ttl_seconds` | `120` |
 | `capabilities_ttl_seconds` | `300` |
+| `xai_client_version` | `1.0.13` (sent as `x-grok-client-version`) |
 
 ### Management UI
 
